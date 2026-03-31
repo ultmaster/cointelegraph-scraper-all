@@ -12,17 +12,17 @@ import re
 import csv
 import time
 import json
-from bs4.element import Tag
+import os
 import numpy as np
 
 #%%
-file_to_store_news = 'news_database.csv' # should be in .csv format
-with open(file_to_store_news, 'a') as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(['category', 'title', 'date', 'n_views', 'n_shares', 'summary', 'content', 'tags'])
+output_dir = 'scraped_data'
+os.makedirs(output_dir, exist_ok=True)
+
+CSV_HEADER = ['category', 'title', 'date', 'n_views', 'n_shares', 'summary', 'content', 'tags']
 
 #%%
-def get_nice_text(soup): # recognize paragraphs and remove "related" part of the content
+def get_nice_text(soup):
     txt = ''
     for par in soup.find_all(lambda tag:tag.name=="p" and not "Related:" in tag.text):
         txt += ' ' + re.sub(" +|\n|\r|\t|\0|\x0b|\xa0",' ',par.get_text())
@@ -37,134 +37,159 @@ def prepare_pandas(df):
     return df
 
 #%%
-headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/ 91.0.4472.124 Safari/537.36'}
-url_base = "https://cointelegraph.com/post-sitemap-"
-total_posts = 0
+def load_checkpoint(csv_path):
+    """Return set of (title, date) already scraped in this CSV."""
+    scraped = set()
+    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader, None)
+            for row in reader:
+                if len(row) >= 3 and row[1] and row[2]:
+                    scraped.add((row[1], row[2]))
+    return scraped
+
+def is_sitemap_done(csv_path, checkpoint_path):
+    """A sitemap is done if its checkpoint file exists and contains 'done'."""
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, 'r') as f:
+            return f.read().strip() == 'done'
+    return False
+
+#%%
+headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
 bad_response = []
 bad_response_count = 0
 
-unparsable_webpage = []
 #%%
-# the code requires number of content-aggregating pages from https://cointelegraph.com/sitemap.xml
-
-def get_n_agg_pages(headers):
+def get_post_sitemap_urls(headers):
     sitemap_url = 'https://cointelegraph.com/sitemap.xml'
     sitemap_webpage = requests.get(sitemap_url, headers=headers)
-    sitemap_soup = BeautifulSoup(sitemap_webpage.text, features = 'xml')
+    sitemap_soup = BeautifulSoup(sitemap_webpage.text, features='xml')
     sitemap_all_links = sitemap_soup.find_all('loc')
-    sitemap_last_part= [link.getText().split('/')[-1] for link in sitemap_all_links]
-    
-    sitemap_pages = [a for a in sitemap_last_part if a.startswith('post-sitemap-')]
-    n_agg_pages = max([int(a.split('-')[-1]) for a in sitemap_pages])
-    return n_agg_pages
+    post_urls = [link.getText() for link in sitemap_all_links if '/sitemap/post-' in link.getText()]
+    return post_urls
 
 #%%
-n_agg_pages = get_n_agg_pages(headers)
+post_sitemap_urls = get_post_sitemap_urls(headers)
+print(f'Found {len(post_sitemap_urls)} post sitemaps')
 
-for i in range(1,n_agg_pages+1): # number of content-aggregating pages from https://cointelegraph.com/sitemap.xml
-    url = url_base+str(i)
-    print('scrapping ', url)
-    web_map = requests.get(url, headers = headers)
-    soup = BeautifulSoup(web_map.text, features = 'lxml')
+total_posts = 0
+
+for sitemap_idx, sitemap_url in enumerate(post_sitemap_urls):
+    # Derive filenames from sitemap name, e.g. "post-1" -> "post-1.csv"
+    sitemap_name = sitemap_url.split('/')[-1].replace('.xml', '')
+    csv_path = os.path.join(output_dir, f'{sitemap_name}.csv')
+    checkpoint_path = os.path.join(output_dir, f'{sitemap_name}.checkpoint')
+
+    # Skip fully completed sitemaps
+    if is_sitemap_done(csv_path, checkpoint_path):
+        existing = load_checkpoint(csv_path)
+        total_posts += len(existing)
+        print(f'[{sitemap_idx+1}/{len(post_sitemap_urls)}] {sitemap_name} already done ({len(existing)} articles)')
+        continue
+
+    print(f'[{sitemap_idx+1}/{len(post_sitemap_urls)}] scraping {sitemap_name}...')
+
+    # Load partial progress for this sitemap
+    scraped = load_checkpoint(csv_path)
+    if scraped:
+        print(f'  resuming, {len(scraped)} articles already scraped')
+
+    # Write header if CSV is new
+    if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+        with open(csv_path, 'w', encoding='utf-8') as f:
+            csv.writer(f).writerow(CSV_HEADER)
+
+    web_map = requests.get(sitemap_url, headers=headers)
+    soup = BeautifulSoup(web_map.text, features='xml')
     all_links = soup.find_all('loc')
 
     posts_downloaded = 0
 
     for item in all_links:
         url_post = item.getText()
-        is_news = url_post.split('/')[3]
-        
-        if is_news != "news":
-            print('\n')
-            print(is_news, 'not a news item \n')
+        section = url_post.split('/')[3] if len(url_post.split('/')) > 3 else ''
+
+        if section not in ("news", "markets"):
             continue
-        
-        page = requests.get(url_post, headers = headers)
+
+        page = requests.get(url_post, headers=headers)
         page.encoding = 'utf-8'
-        sauce = BeautifulSoup(page.text,"lxml")
-        
+        sauce = BeautifulSoup(page.text, "lxml")
+
+        # Parse LD+JSON structured data
         try:
-            data = json.loads(sauce.find('script', type='application/ld+json').string)
-        except:
-            print('Something is wrong: status', page.status_code, 'will sleep and retry')
+            ld_json = json.loads(sauce.find('script', type='application/ld+json').string)
+        except Exception:
+            print('  bad response, status', page.status_code, '- retrying...')
             time.sleep(4)
-            try: 
-                data = json.loads(sauce.find('script', type='application/ld+json').string)
-            except:
-                print('Sleeping didnt solve the problem, going to the next post')
+            try:
+                page = requests.get(url_post, headers=headers)
+                page.encoding = 'utf-8'
+                sauce = BeautifulSoup(page.text, "lxml")
+                ld_json = json.loads(sauce.find('script', type='application/ld+json').string)
+            except Exception:
+                print('  retry failed, skipping')
                 bad_response.append(url_post)
-                bad_response_count +=1
+                bad_response_count += 1
                 continue
-                
-            
-        try:
-            art_tag = data['articleSection']    
-        except: 
-            art_tag = None
-        try:
-            date = data['datePublished']
-        except:
-            date = None
-            
-        titleTag = sauce.find("h1",{"class":"post__title"})
-        summaryTag = sauce.find("p", {"class":"post__lead"})
-        contentTag = sauce.find("div",{"class":"post-content"})
-        tagsTag = sauce.find('ul', {"class":"tags-list__list"}) # some articles have tags which could help with classification
-        
-        title = None
-        content = None
-        summary = None
+
+        # Extract article data from @graph array or flat structure
+        data = {}
+        if '@graph' in ld_json:
+            for graph_item in ld_json['@graph']:
+                if graph_item.get('@type') in (['Article', 'NewsArticle'], 'NewsArticle', 'Article'):
+                    data = graph_item
+                    break
+        else:
+            data = ld_json
+
+        art_tag = data.get('articleSection')
+        date = data.get('datePublished')
+
+        # Extract from HTML using data-testid attributes
+        titleTag = sauce.find(attrs={"data-testid": "post-title"}) or sauce.find("h1")
+        descTag = sauce.find(attrs={"data-testid": "post-description"})
+        contentTag = sauce.find(attrs={"data-testid": "html-renderer-container"})
+        article = sauce.find("article")
+
+        title = titleTag.get_text().strip() if titleTag else data.get('headline')
+        summary = descTag.get_text().strip() if descTag else None
+        content = get_nice_text(contentTag) if contentTag else None
+
+        # Skip if already scraped
+        if title and date and (title, date) in scraped:
+            continue
+
+        # Get tags only from within the article to avoid nav/footer tags
         tags_list = None
-        
-        if isinstance(titleTag,Tag):
-            title = titleTag.get_text().strip()
-            
-        if isinstance(contentTag,Tag):
-            content = get_nice_text(contentTag)
-    
-        if isinstance(summaryTag, Tag):
-            summary = summaryTag.get_text().strip() 
-            
-        if isinstance(tagsTag, Tag):
-            tags_str = tagsTag.get_text().strip()
-            tags_list_prep = tags_str.split('#')
-            tags_list = [i.strip() for i in tags_list_prep if len(i)>0]
-            
-        stats = sauce.find_all('div', {"class" : "post-actions__item post-actions__item_stat"}) 
-        
-        if len(stats)>0:
-            views = stats[0]    
-            views_list = views.get_text().strip().split(" ")
-            count_views = int(views_list[0])
-            
-            if len(stats)>1:
-                shares = stats[1]
-                shares_list = shares.get_text().strip().split(" ")
-                count_shares = int(shares_list[0])
-            else: 
-                count_shares = None
-        else: 
-            count_views = None
-            count_shares = None
-            
-        #if posts_downloaded% 500 == 0:
-         #   print('Date:', date, 'title:', title, 'summary:', summary )        
-        
-        with open(file_to_store_news, 'a', encoding = 'utf-8') as csv_file:
+        if article:
+            tag_links = article.find_all(attrs={"data-testid": "post-tag"})
+            if tag_links:
+                tags_list = [a.get_text().strip().lstrip('#') for a in tag_links]
+
+        count_views = None
+        count_shares = None
+
+        with open(csv_path, 'a', encoding='utf-8') as csv_file:
             writer = csv.writer(csv_file)
             writer.writerow([art_tag, title, date, count_views, count_shares, summary, content, tags_list])
-            
-        posts_downloaded +=1
-        
-    total_posts += posts_downloaded
-    print('loaded ', total_posts, 'posts')
+
+        if title and date:
+            scraped.add((title, date))
+        posts_downloaded += 1
+
+    total_posts += len(scraped)
+
+    # Mark sitemap as fully done
+    with open(checkpoint_path, 'w') as f:
+        f.write('done')
+
+    print(f'  {posts_downloaded} new articles, {total_posts} total')
+
     to_sleep = abs(np.random.normal(2, 3))
     time.sleep(to_sleep)
-    
-    
-#%%
-news_map = pd.read_csv(file_to_store_news)
-news_map = prepare_pandas(news_map)
 
-
+print(f'\nFinished. {total_posts} articles total, {bad_response_count} failures')
