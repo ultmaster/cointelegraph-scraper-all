@@ -105,33 +105,44 @@ for sitemap_idx, sitemap_url in enumerate(post_sitemap_urls):
     web_map = requests.get(sitemap_url, headers=headers)
     soup = BeautifulSoup(web_map.text, features='xml')
     all_links = soup.find_all('loc')
+    total_urls = len(all_links)
+    news_urls = [l.getText() for l in all_links if len(l.getText().split('/')) > 3 and l.getText().split('/')[3] in ("news", "markets")]
+    skipped_sections = total_urls - len(news_urls)
+
+    print(f'  found {total_urls} URLs, {len(news_urls)} are news/markets, {skipped_sections} skipped')
 
     posts_downloaded = 0
+    posts_skipped = 0
 
-    for item in all_links:
-        url_post = item.getText()
-        section = url_post.split('/')[3] if len(url_post.split('/')) > 3 else ''
-
-        if section not in ("news", "markets"):
-            continue
+    for article_idx, url_post in enumerate(news_urls):
+        slug = url_post.split('/')[-1][:60]
+        print(f'  [{article_idx+1}/{len(news_urls)}] {slug}...', end=' ', flush=True)
 
         page = requests.get(url_post, headers=headers)
         page.encoding = 'utf-8'
+
+        if page.status_code != 200:
+            print(f'HTTP {page.status_code}, skipping')
+            bad_response.append(url_post)
+            bad_response_count += 1
+            continue
+
         sauce = BeautifulSoup(page.text, "lxml")
 
         # Parse LD+JSON structured data
         try:
             ld_json = json.loads(sauce.find('script', type='application/ld+json').string)
         except Exception:
-            print('  bad response, status', page.status_code, '- retrying...')
+            print(f'parse failed (HTTP {page.status_code}), retrying...')
             time.sleep(4)
             try:
                 page = requests.get(url_post, headers=headers)
                 page.encoding = 'utf-8'
                 sauce = BeautifulSoup(page.text, "lxml")
                 ld_json = json.loads(sauce.find('script', type='application/ld+json').string)
+                print('retry OK.', end=' ')
             except Exception:
-                print('  retry failed, skipping')
+                print('retry failed, skipping')
                 bad_response.append(url_post)
                 bad_response_count += 1
                 continue
@@ -161,7 +172,18 @@ for sitemap_idx, sitemap_url in enumerate(post_sitemap_urls):
 
         # Skip if already scraped
         if title and date and (title, date) in scraped:
+            posts_skipped += 1
+            print('already scraped, skipping')
             continue
+
+        # Log missing fields
+        missing = []
+        if not title: missing.append('title')
+        if not date: missing.append('date')
+        if not summary: missing.append('summary')
+        if not content: missing.append('content')
+        if missing:
+            print(f'WARNING missing: {", ".join(missing)}.', end=' ')
 
         # Get tags only from within the article to avoid nav/footer tags
         tags_list = None
@@ -180,6 +202,7 @@ for sitemap_idx, sitemap_url in enumerate(post_sitemap_urls):
         if title and date:
             scraped.add((title, date))
         posts_downloaded += 1
+        print(f'saved ({date})')
 
     total_posts += len(scraped)
 
@@ -187,9 +210,16 @@ for sitemap_idx, sitemap_url in enumerate(post_sitemap_urls):
     with open(checkpoint_path, 'w') as f:
         f.write('done')
 
-    print(f'  {posts_downloaded} new articles, {total_posts} total')
+    csv_size = os.path.getsize(csv_path) / 1024
+    print(f'  done: {posts_downloaded} new, {posts_skipped} skipped, {len(scraped)} total in CSV ({csv_size:.1f} KB)')
+    print(f'  cumulative: {total_posts} articles, {bad_response_count} failures')
 
     to_sleep = abs(np.random.normal(2, 3))
     time.sleep(to_sleep)
 
-print(f'\nFinished. {total_posts} articles total, {bad_response_count} failures')
+print(f'\n{"="*60}')
+print(f'Finished. {total_posts} articles total, {bad_response_count} failures')
+if bad_response:
+    print(f'Failed URLs:')
+    for url in bad_response:
+        print(f'  {url}')
