@@ -1,25 +1,47 @@
-# Cointelegraph full website scraper 
+# Cointelegraph full website scraper
 
-Are you cryptocurrencies enthusiast? 
-Are you interested in NLP and looking for a real-world news database? 
-Or is it both? 
-I've got you covered! 
+Scrapes all news and market analysis articles from [cointelegraph.com](https://cointelegraph.com) via its sitemap.
 
-This code scrapes all news articles from cointelegraph.com. 
+## Output
 
-The output is saved in the .csv file, and following data is stored: 
-- Category of the article
-- Its title
-- Date and time (with timezone indication) published
-- Number of views and number of shares
-- Article's summary
-- Article's content
-- The tags, attributed to the article. 
+Results are saved as one CSV per sitemap in the `scraped_data/` folder:
 
-This scrapper uses the cointelegraph sitemap: https://cointelegraph.com/sitemap.xml and doesn't requre any input from your side.
+```
+scraped_data/
+  post-1.csv
+  post-1.checkpoint
+  post-2.csv
+  post-2.checkpoint
+  ...
+```
 
-The code doesn't use Selenium and operates through the requests library, which can be easily installed through pip: pip install requests. 
-You will also need a BeautifulSoup library to parse the webpages (the name is beautifulsoup4, documentation is here: https://www.crummy.com/software/BeautifulSoup/bs4/doc/#installing-beautiful-soup), 
-and an lxml parser. Please recall that it is highly recommended to create different environments for separate projects to manage the dependencies between libraries. 
+Each CSV contains the following columns:
+- `category` - article section (e.g. Latest News, Market Analysis)
+- `title` - article headline
+- `date` - publication date and time (ISO 8601 with timezone)
+- `n_views` - number of views (currently unavailable via static scraping)
+- `n_shares` - number of shares (currently unavailable via static scraping)
+- `summary` - article summary/lead paragraph
+- `content` - full article text
+- `tags` - tags attributed to the article
 
-The code takes approximately 16 hours to scrap the whole website. 
+## Usage
+
+```bash
+pip install requests beautifulsoup4 lxml pandas numpy
+python scrapping_through_sitemap.py
+```
+
+The scraper supports **pause and resume**. You can stop it at any time (Ctrl+C) and rerun the same command to continue where you left off. Completed sitemaps are tracked via `.checkpoint` files, and partially-scraped sitemaps resume by skipping already-downloaded articles.
+
+To start fresh, delete the `scraped_data/` folder.
+
+## How it works
+
+1. Fetches the sitemap index from `https://cointelegraph.com/sitemap.xml`
+2. Iterates through each post sitemap (`post-1.xml` through `post-43.xml`)
+3. Filters for `news` and `markets` articles
+4. Extracts structured data from JSON-LD and HTML (`data-testid` attributes)
+5. Saves results to per-sitemap CSV files with checkpoint tracking
+
+The scraper uses the `requests` library (no Selenium/browser required) and adds random delays between sitemaps to be respectful of the server.
