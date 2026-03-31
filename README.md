@@ -39,7 +39,7 @@ To start fresh, delete the `scraped_data/` folder.
 ## How it works
 
 1. Fetches the sitemap index from `https://cointelegraph.com/sitemap.xml`
-2. Iterates through each post sitemap (`post-1.xml` through `post-43.xml`)
+2. Iterates through each post sitemap (e.g. `post-1.xml`, `post-2.xml`, ...)
 3. Filters for `news` and `markets` articles
 4. Extracts structured data from JSON-LD and HTML (`data-testid` attributes)
 5. Saves results to per-sitemap CSV files with checkpoint tracking
